@@ -14,6 +14,19 @@ function getOpponent(player: PlayerId): PlayerId {
 }
 
 /**
+ * Fisher-Yates shuffle - uniformly random permutation.
+ * Fixes biased shuffle from sort(() => Math.random() - 0.5)
+ */
+function shuffleArray<T>(array: T[]): T[] {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/**
  * Pick the question that splits CPU's remaining characters closest to 50/50.
  * Used internally to drive simultaneous CPU questions in free mode.
  */
@@ -26,8 +39,9 @@ function pickBestQuestionForCPU(
 
   // Optimisation: for massive pools, sample a subset to find a good-enough split
   // 30,000 evaluations (30 questions * 1000 chars) is too slow for a state update.
+  // FIXED: Use Fisher-Yates shuffle instead of biased sort
   const sample = remaining.length > 100
-    ? [...remaining].sort(() => Math.random() - 0.5).slice(0, 50)
+    ? shuffleArray(remaining).slice(0, 50)
     : remaining;
 
   let best = available[0];

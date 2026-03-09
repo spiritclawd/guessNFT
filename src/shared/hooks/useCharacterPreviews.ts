@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useState } from 'react';
+import { useMemo, useEffect, useState, useRef, useCallback } from 'react';
 import { useGameCharacters } from '@/core/store/selectors';
 import { renderPortrait } from '@/rendering/canvas/PortraitRenderer';
 import ImageCache from '@/shared/services/ImageCache';
@@ -11,23 +11,24 @@ import ImageCache from '@/shared/services/ImageCache';
  *
  * Used in UI panels (character select, guess panel) where we need
  * thumbnails rather than Three.js textures.
+ *
+ * FIXED: Removed polling hack, now uses proper async loading with callbacks.
  */
 export function useCharacterPreviews(): Map<string, string> {
   const characters = useGameCharacters();
-  const [version, setVersion] = useState(0);
+  const [loadedCount, setLoadedCount] = useState(0);
+  const loadingRef = useRef<Set<string>>(new Set());
 
-  // Subscribe to cache updates - trigger re-render when images load
+  // Track which images we've started loading
+  const pendingLoads = useRef<Map<string, Promise<void>>>(new Map());
+
   useEffect(() => {
-    const checkInterval = setInterval(() => {
-      // Check if any new images have been loaded
-      const stats = ImageCache.getStats();
-      if (stats.cached > 0) {
-        setVersion(v => v + 1);
-      }
-    }, 500);
-
-    return () => clearInterval(checkInterval);
-  }, []);
+    // Count how many images are already cached
+    const cachedCount = characters.filter(c => ImageCache.has(c.id)).length;
+    if (cachedCount !== loadedCount) {
+      setLoadedCount(cachedCount);
+    }
+  }, [characters, loadedCount]);
 
   return useMemo(() => {
     const map = new Map<string, string>();
@@ -35,7 +36,7 @@ export function useCharacterPreviews(): Map<string, string> {
     const skipCanvas = characters.length > 50;
 
     for (const char of characters) {
-      // Priority 1: Check unified cache for data URL
+      // Priority 1: Check unified cache for URL
       const cachedUrl = ImageCache.getUrl(char.id);
       if (cachedUrl) {
         map.set(char.id, cachedUrl);
@@ -46,8 +47,16 @@ export function useCharacterPreviews(): Map<string, string> {
       const imageUrl = (char as any).imageUrl as string | undefined;
       if (imageUrl) {
         map.set(char.id, imageUrl);
-        // Trigger async load for future cache hits
-        ImageCache.load(char.id, imageUrl);
+
+        // Trigger async load for future cache hits (deduped by ImageCache)
+        if (!loadingRef.current.has(char.id)) {
+          loadingRef.current.add(char.id);
+          ImageCache.load(char.id, imageUrl).then(() => {
+            loadingRef.current.delete(char.id);
+            // Trigger re-render to pick up cached URL
+            setLoadedCount(c => c + 1);
+          });
+        }
         continue;
       }
 
@@ -71,7 +80,7 @@ export function useCharacterPreviews(): Map<string, string> {
     }
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [characters, version]);
+  }, [characters, loadedCount]);
 }
 
 /**
@@ -80,7 +89,10 @@ export function useCharacterPreviews(): Map<string, string> {
 export function useCharacterPreview(charId: string): string | null {
   const characters = useGameCharacters();
   const char = characters.find(c => c.id === charId);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(() => {
+    // Initialize synchronously from cache if available
+    return ImageCache.getUrl(charId) ?? null;
+  });
 
   useEffect(() => {
     if (!char) {
@@ -99,7 +111,7 @@ export function useCharacterPreview(charId: string): string | null {
     const imageUrl = (char as any).imageUrl as string | undefined;
     if (imageUrl) {
       setPreviewUrl(imageUrl);
-      // Trigger async load
+      // Trigger async load (deduped by ImageCache)
       ImageCache.load(charId, imageUrl).then(() => {
         const url = ImageCache.getUrl(charId);
         if (url) setPreviewUrl(url);

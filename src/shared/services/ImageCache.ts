@@ -10,6 +10,10 @@
  * - Provides URLs for React <img> elements
  * - Provides HTMLCanvasElement for TextureAtlas
  * - Preloading support for visible characters first
+ *
+ * FIXED BUGS:
+ * - globalTextureCache.set() now creates entry if missing
+ * - getUrl() returns original URL when available (not always data URL)
  */
 
 import * as THREE from 'three';
@@ -47,10 +51,12 @@ const pendingLoads = new Map<string, Promise<HTMLImageElement | HTMLCanvasElemen
 /** Pre-computed procedural canvases (instant placeholders) */
 const proceduralCache = new Map<string, HTMLCanvasElement>();
 
+/** Original image URLs for direct <img> use (avoids data URL creation) */
+const originalUrls = new Map<string, string>();
+
 /** Configuration */
 const DEFAULT_SIZE = 128;
 const MAX_CACHE_SIZE = 1500; // Limit memory for large NFT collections
-const CACHE_EVICTION_AGE = 5 * 60 * 1000; // 5 minutes
 
 // ─── Helper Functions ─────────────────────────────────────────────────────
 
@@ -135,6 +141,8 @@ function evictIfNeeded(): void {
       cached.texture.dispose();
     }
     imageCache.delete(id);
+    originalUrls.delete(id);
+    proceduralCache.delete(id);
   }
 }
 
@@ -152,6 +160,11 @@ export const ImageCache = {
     options: LoadOptions = {}
   ): Promise<HTMLImageElement | HTMLCanvasElement | null> {
     const { size = DEFAULT_SIZE, force = false } = options;
+
+    // Store original URL for direct <img> use (avoids expensive data URL)
+    if (imageUrl && !originalUrls.has(charId)) {
+      originalUrls.set(charId, imageUrl);
+    }
 
     // Return cached if available and not forcing reload
     if (!force && imageCache.has(charId)) {
@@ -228,13 +241,26 @@ export const ImageCache = {
 
   /**
    * Get URL for React <img> element.
-   * Returns original URL if available, otherwise creates data URL.
+   * FIX: Returns original imageUrl if available (avoids expensive data URL)
+   * Falls back to data URL only if no original URL exists.
    */
   getUrl(charId: string): string | null {
+    // Priority 1: Return original URL if we have it (free, no conversion)
+    const originalUrl = originalUrls.get(charId);
+    if (originalUrl) {
+      return originalUrl;
+    }
+
+    // Priority 2: Create data URL from cached canvas
     const cached = imageCache.get(charId);
     if (!cached) return null;
 
-    // Lazy-create data URL if needed
+    // Don't create data URL for procedural placeholders (use original URL if available)
+    if (cached.sourceUrl === 'procedural') {
+      return null;
+    }
+
+    // Lazy-create data URL only as fallback
     if (!cached.dataUrl) {
       if (cached.image instanceof HTMLCanvasElement) {
         cached.dataUrl = cached.image.toDataURL();
@@ -345,16 +371,18 @@ export const ImageCache = {
     imageCache.clear();
     proceduralCache.clear();
     pendingLoads.clear();
+    originalUrls.clear();
   },
 
   /**
    * Get cache stats for debugging
    */
-  getStats(): { cached: number; pending: number; procedural: number } {
+  getStats(): { cached: number; pending: number; procedural: number; originalUrls: number } {
     return {
       cached: imageCache.size,
       pending: pendingLoads.size,
       procedural: proceduralCache.size,
+      originalUrls: originalUrls.size,
     };
   },
 
@@ -365,17 +393,31 @@ export const ImageCache = {
 
 // ─── Backward Compatibility Exports ───────────────────────────────────────
 
-/** For existing code that imports globalTextureCache */
+/**
+ * For existing code that imports globalTextureCache
+ *
+ * FIX: set() now creates entry if it doesn't exist (prevents silent data loss)
+ */
 export const globalTextureCache = {
   get(charId: string): THREE.Texture | undefined {
     const texture = ImageCache.getTexture(charId);
     return texture ?? undefined;
   },
   set(charId: string, texture: THREE.Texture): void {
-    // Store in unified cache
+    // FIX: Create entry if it doesn't exist
     const cached = imageCache.get(charId);
     if (cached) {
       cached.texture = texture;
+    } else {
+      // Create a new entry with the texture
+      // Note: image will be null, but texture is set
+      imageCache.set(charId, {
+        image: texture.image as HTMLCanvasElement,
+        texture: texture,
+        dataUrl: null,
+        sourceUrl: 'external',
+        loadedAt: Date.now(),
+      });
     }
   },
   has(charId: string): boolean {
